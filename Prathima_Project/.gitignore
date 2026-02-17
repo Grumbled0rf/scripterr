@@ -1,0 +1,42 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Data files (large)
+data/*.csv
+data/*.pkl
+
+# Model files (large)
+models/*.pkl
+models/*.h5
+models/hybrid_model/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Outputs (regeneratable)
+outputs/plots/*.png
+outputs/results/*.csv
+outputs/results/*.txt
+
+# Claude
+.claude/
