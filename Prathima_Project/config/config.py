@@ -17,8 +17,8 @@ RESULTS_DIR = OUTPUTS_DIR / "results"
 for dir_path in [DATA_DIR, MODELS_DIR, OUTPUTS_DIR, PLOTS_DIR, RESULTS_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# Data URLs - Open Power System Data
-OPSD_TIME_SERIES_URL = "https://data.open-power-system-data.org/time_series/latest/time_series_60min_singleindex.csv"
+# Data URLs - Open Power System Data (2020-10-06 version)
+OPSD_TIME_SERIES_URL = "https://data.open-power-system-data.org/time_series/2020-10-06/time_series_60min_singleindex.csv"
 
 # Data parameters
 COUNTRY = "IE"  # Ireland
