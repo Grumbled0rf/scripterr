@@ -1,0 +1,14 @@
+======================================================================
+IRELAND ELECTRICITY DEMAND FORECASTING - SUMMARY REPORT
+======================================================================
+
+Data Summary:
+  Training samples: 39725
+  Validation samples: 4965
+  Test samples: 4967
+  Number of features: 54
+
+Model Performance:
+        model      MAE      RMSE     MAPE       R2  Max_Error  Median_AE
+      XGBoost 6.272117 13.495980 0.201990 0.999429 652.153076   4.176758
+Random Forest 4.290042 15.953263 0.140297 0.999203 852.970993   1.943884

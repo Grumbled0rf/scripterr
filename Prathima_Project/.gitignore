@@ -33,10 +33,11 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Outputs (regeneratable)
-outputs/plots/*.png
-outputs/results/*.csv
-outputs/results/*.txt
+# Outputs - included for dissertation reproducibility
+# (uncomment to exclude)
+# outputs/plots/*.png
+# outputs/results/*.csv
+# outputs/results/*.txt
 
 # Claude
 .claude/
