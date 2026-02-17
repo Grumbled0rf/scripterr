@@ -135,11 +135,35 @@ def prepare_demand_data(df):
     demand_df = pd.DataFrame()
     demand_df['demand'] = df[target_col].copy()
 
-    # Add wind and solar if available
-    if 'IE_wind_onshore_generation_actual' in df.columns:
-        demand_df['wind_generation'] = df['IE_wind_onshore_generation_actual']
-    if 'IE_solar_generation_actual' in df.columns:
-        demand_df['solar_generation'] = df['IE_solar_generation_actual']
+    # Add renewable generation features (proxy for weather conditions)
+    print("\nAdding weather/generation features...")
+
+    # Wind generation (proxy for wind speed)
+    wind_cols = [col for col in df.columns if 'wind' in col.lower() and 'actual' in col.lower()]
+    if wind_cols:
+        # Combine all wind generation
+        demand_df['wind_generation'] = df[wind_cols].sum(axis=1)
+        print(f"  Added wind generation from {len(wind_cols)} columns")
+
+    # Solar generation (proxy for solar irradiance)
+    solar_cols = [col for col in df.columns if 'solar' in col.lower() and 'actual' in col.lower()]
+    if solar_cols:
+        demand_df['solar_generation'] = df[solar_cols].sum(axis=1)
+        print(f"  Added solar generation from {len(solar_cols)} columns")
+
+    # Total renewable generation
+    if 'wind_generation' in demand_df.columns or 'solar_generation' in demand_df.columns:
+        demand_df['renewable_generation'] = demand_df.get('wind_generation', 0) + demand_df.get('solar_generation', 0)
+
+    # Renewable share (if we have generation data)
+    if 'renewable_generation' in demand_df.columns:
+        demand_df['renewable_share'] = demand_df['renewable_generation'] / demand_df['demand'].clip(lower=1)
+
+    # Load forecast (can be useful feature)
+    forecast_cols = [col for col in df.columns if 'forecast' in col.lower() and 'load' in col.lower()]
+    if forecast_cols:
+        demand_df['load_forecast'] = df[forecast_cols[0]]
+        print(f"  Added load forecast: {forecast_cols[0]}")
 
     # Remove rows with missing demand
     initial_len = len(demand_df)

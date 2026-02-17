@@ -1,16 +1,25 @@
 """
 Model Evaluation Module
+Enhanced with skill scores, statistical tests, and cross-validation
 """
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from pathlib import Path
 import sys
+import warnings
+
+warnings.filterwarnings('ignore')
 
 sys.path.append(str(Path(__file__).parent.parent))
 from config.config import RESULTS_DIR
 
+
+# =============================================================================
+# BASIC METRICS
+# =============================================================================
 
 def calculate_mape(y_true, y_pred):
     """Calculate Mean Absolute Percentage Error."""
@@ -57,6 +66,369 @@ def calculate_metrics(y_true, y_pred, model_name="Model"):
 
     return metrics
 
+
+# =============================================================================
+# SKILL SCORES
+# =============================================================================
+
+def calculate_skill_score(y_true, y_pred, y_pred_baseline):
+    """
+    Calculate skill score relative to baseline (persistence) model.
+
+    Skill Score = 1 - (MSE_model / MSE_baseline)
+    - SS > 0: Model is better than baseline
+    - SS = 0: Model equals baseline
+    - SS < 0: Model is worse than baseline
+
+    Parameters:
+    -----------
+    y_true : array-like
+        Actual values
+    y_pred : array-like
+        Model predictions
+    y_pred_baseline : array-like
+        Baseline (persistence) predictions
+
+    Returns:
+    --------
+    float : Skill score
+    """
+    mse_model = mean_squared_error(y_true, y_pred)
+    mse_baseline = mean_squared_error(y_true, y_pred_baseline)
+
+    if mse_baseline == 0:
+        return np.nan
+
+    skill_score = 1 - (mse_model / mse_baseline)
+    return skill_score
+
+
+def calculate_all_skill_scores(models, X_test, y_test, persistence_predictions):
+    """
+    Calculate skill scores for all models vs persistence baseline.
+
+    Returns:
+    --------
+    pd.DataFrame : Skill scores for each model
+    """
+    results = []
+
+    for name, model in models.items():
+        try:
+            y_pred = model.predict(X_test)
+            skill = calculate_skill_score(y_test, y_pred, persistence_predictions)
+            results.append({
+                'model': name,
+                'skill_score': skill,
+                'improvement_pct': skill * 100
+            })
+        except Exception as e:
+            results.append({
+                'model': name,
+                'skill_score': np.nan,
+                'improvement_pct': np.nan
+            })
+
+    return pd.DataFrame(results).sort_values('skill_score', ascending=False)
+
+
+# =============================================================================
+# DIEBOLD-MARIANO TEST
+# =============================================================================
+
+def diebold_mariano_test(y_true, y_pred1, y_pred2, h=1, criterion='MSE'):
+    """
+    Diebold-Mariano test for comparing forecast accuracy.
+
+    Tests the null hypothesis that two forecasts have equal accuracy.
+
+    Parameters:
+    -----------
+    y_true : array-like
+        Actual values
+    y_pred1 : array-like
+        Predictions from model 1
+    y_pred2 : array-like
+        Predictions from model 2
+    h : int
+        Forecast horizon (for HAC variance estimation)
+    criterion : str
+        Loss criterion ('MSE' or 'MAE')
+
+    Returns:
+    --------
+    dict : Test statistic, p-value, and interpretation
+    """
+    from scipy import stats
+
+    y_true = np.array(y_true).flatten()
+    y_pred1 = np.array(y_pred1).flatten()
+    y_pred2 = np.array(y_pred2).flatten()
+
+    # Calculate loss differentials
+    if criterion == 'MSE':
+        e1 = (y_true - y_pred1) ** 2
+        e2 = (y_true - y_pred2) ** 2
+    else:  # MAE
+        e1 = np.abs(y_true - y_pred1)
+        e2 = np.abs(y_true - y_pred2)
+
+    d = e1 - e2  # Loss differential
+    n = len(d)
+
+    # Calculate DM statistic
+    mean_d = np.mean(d)
+
+    # HAC variance estimator (Newey-West)
+    gamma_0 = np.var(d)
+    gamma_sum = 0
+    for k in range(1, h):
+        gamma_k = np.cov(d[:-k], d[k:])[0, 1]
+        gamma_sum += 2 * gamma_k
+
+    var_d = (gamma_0 + gamma_sum) / n
+
+    if var_d <= 0:
+        var_d = gamma_0 / n
+
+    dm_stat = mean_d / np.sqrt(var_d)
+    p_value = 2 * (1 - stats.norm.cdf(np.abs(dm_stat)))
+
+    # Interpretation
+    if p_value < 0.05:
+        if mean_d < 0:
+            interpretation = "Model 1 significantly better than Model 2"
+        else:
+            interpretation = "Model 2 significantly better than Model 1"
+    else:
+        interpretation = "No significant difference between models"
+
+    return {
+        'dm_statistic': dm_stat,
+        'p_value': p_value,
+        'mean_loss_diff': mean_d,
+        'interpretation': interpretation
+    }
+
+
+def compare_models_dm(models, X_test, y_test, reference_model='XGBoost'):
+    """
+    Compare all models against a reference using Diebold-Mariano test.
+
+    Returns:
+    --------
+    pd.DataFrame : DM test results for each model comparison
+    """
+    results = []
+
+    if reference_model not in models:
+        reference_model = list(models.keys())[0]
+
+    y_pred_ref = models[reference_model].predict(X_test)
+
+    for name, model in models.items():
+        if name == reference_model:
+            continue
+
+        try:
+            y_pred = model.predict(X_test)
+            dm_result = diebold_mariano_test(y_test, y_pred_ref, y_pred)
+
+            results.append({
+                'comparison': f"{reference_model} vs {name}",
+                'dm_statistic': dm_result['dm_statistic'],
+                'p_value': dm_result['p_value'],
+                'significant': dm_result['p_value'] < 0.05,
+                'interpretation': dm_result['interpretation']
+            })
+        except Exception as e:
+            results.append({
+                'comparison': f"{reference_model} vs {name}",
+                'dm_statistic': np.nan,
+                'p_value': np.nan,
+                'significant': False,
+                'interpretation': f"Error: {str(e)}"
+            })
+
+    return pd.DataFrame(results)
+
+
+# =============================================================================
+# TIME SERIES CROSS-VALIDATION
+# =============================================================================
+
+def time_series_cross_validate(model_class, X, y, n_splits=5, **model_params):
+    """
+    Perform time series cross-validation.
+
+    Parameters:
+    -----------
+    model_class : class
+        Model class to instantiate
+    X : pd.DataFrame
+        Features
+    y : np.ndarray
+        Target
+    n_splits : int
+        Number of CV splits
+    **model_params : dict
+        Parameters for model instantiation
+
+    Returns:
+    --------
+    dict : CV results with metrics for each fold
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    fold_results = []
+
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        print(f"  Fold {fold + 1}/{n_splits}...")
+
+        X_train_cv = X.iloc[train_idx] if hasattr(X, 'iloc') else X[train_idx]
+        X_test_cv = X.iloc[test_idx] if hasattr(X, 'iloc') else X[test_idx]
+        y_train_cv = y[train_idx]
+        y_test_cv = y[test_idx]
+
+        # Train model
+        model = model_class(**model_params)
+        model.fit(X_train_cv, y_train_cv)
+
+        # Predict
+        y_pred = model.predict(X_test_cv)
+
+        # Calculate metrics
+        metrics = calculate_metrics(y_test_cv, y_pred, f"Fold {fold + 1}")
+        metrics['fold'] = fold + 1
+        metrics['train_size'] = len(train_idx)
+        metrics['test_size'] = len(test_idx)
+
+        fold_results.append(metrics)
+
+    results_df = pd.DataFrame(fold_results)
+
+    # Summary statistics
+    summary = {
+        'mean_MAE': results_df['MAE'].mean(),
+        'std_MAE': results_df['MAE'].std(),
+        'mean_RMSE': results_df['RMSE'].mean(),
+        'std_RMSE': results_df['RMSE'].std(),
+        'mean_MAPE': results_df['MAPE'].mean(),
+        'std_MAPE': results_df['MAPE'].std(),
+        'mean_R2': results_df['R2'].mean(),
+        'std_R2': results_df['R2'].std()
+    }
+
+    return {
+        'fold_results': results_df,
+        'summary': summary
+    }
+
+
+def run_cv_for_all_models(X, y, n_splits=5):
+    """
+    Run time series CV for multiple model types.
+
+    Returns:
+    --------
+    dict : CV results for each model type
+    """
+    from src.models import RandomForestModel, XGBoostModel
+
+    print("\n" + "=" * 50)
+    print("TIME SERIES CROSS-VALIDATION")
+    print("=" * 50)
+
+    results = {}
+
+    # Random Forest CV
+    print("\nRandom Forest CV...")
+    try:
+        from sklearn.ensemble import RandomForestRegressor
+        rf_cv = time_series_cross_validate(
+            RandomForestRegressor,
+            X, y, n_splits,
+            n_estimators=100, max_depth=10, random_state=42, n_jobs=-1
+        )
+        results['Random Forest'] = rf_cv
+        print(f"  Mean RMSE: {rf_cv['summary']['mean_RMSE']:.2f} ± {rf_cv['summary']['std_RMSE']:.2f}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    # XGBoost CV
+    print("\nXGBoost CV...")
+    try:
+        from xgboost import XGBRegressor
+        xgb_cv = time_series_cross_validate(
+            XGBRegressor,
+            X, y, n_splits,
+            n_estimators=100, max_depth=6, learning_rate=0.1, random_state=42
+        )
+        results['XGBoost'] = xgb_cv
+        print(f"  Mean RMSE: {xgb_cv['summary']['mean_RMSE']:.2f} ± {xgb_cv['summary']['std_RMSE']:.2f}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    return results
+
+
+# =============================================================================
+# PREDICTION INTERVAL EVALUATION
+# =============================================================================
+
+def evaluate_prediction_intervals(y_true, y_lower, y_upper, confidence=0.90):
+    """
+    Evaluate prediction interval quality.
+
+    Parameters:
+    -----------
+    y_true : array-like
+        Actual values
+    y_lower : array-like
+        Lower bound predictions
+    y_upper : array-like
+        Upper bound predictions
+    confidence : float
+        Expected coverage (e.g., 0.90 for 90% PI)
+
+    Returns:
+    --------
+    dict : Interval evaluation metrics
+    """
+    y_true = np.array(y_true).flatten()
+    y_lower = np.array(y_lower).flatten()
+    y_upper = np.array(y_upper).flatten()
+
+    # Coverage: proportion of actual values within interval
+    in_interval = (y_true >= y_lower) & (y_true <= y_upper)
+    coverage = np.mean(in_interval)
+
+    # Average interval width
+    interval_width = y_upper - y_lower
+    avg_width = np.mean(interval_width)
+    avg_width_pct = np.mean(interval_width / y_true) * 100
+
+    # Interval score (proper scoring rule)
+    alpha = 1 - confidence
+    interval_score = np.mean(
+        (y_upper - y_lower) +
+        (2 / alpha) * (y_lower - y_true) * (y_true < y_lower) +
+        (2 / alpha) * (y_true - y_upper) * (y_true > y_upper)
+    )
+
+    return {
+        'coverage': coverage,
+        'expected_coverage': confidence,
+        'coverage_error': coverage - confidence,
+        'avg_interval_width': avg_width,
+        'avg_interval_width_pct': avg_width_pct,
+        'interval_score': interval_score
+    }
+
+
+# =============================================================================
+# ORIGINAL EVALUATION FUNCTIONS
+# =============================================================================
 
 def evaluate_models(models, X_test, y_test):
     """

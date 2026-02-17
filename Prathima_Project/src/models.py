@@ -24,41 +24,129 @@ from config.config import (
 # BASELINE MODELS
 # =============================================================================
 
-class ARIMAModel:
-    """SARIMA model for baseline comparison."""
+class PersistenceModel:
+    """
+    Persistence (Naive) baseline model.
+    Predicts current value = previous value.
+    """
 
-    def __init__(self, order=(1, 1, 1), seasonal_order=(1, 1, 1, 24)):
+    def __init__(self, lag=1):
+        self.lag = lag
+        self.name = f"Persistence (lag={lag})"
+
+    def fit(self, X_train, y_train):
+        """No fitting required for persistence model."""
+        print(f"Persistence model initialized (lag={self.lag})")
+        return self
+
+    def predict(self, X, y_lagged=None):
+        """
+        Predict using lagged values.
+        If y_lagged provided, use it directly.
+        Otherwise, look for lag feature in X.
+        """
+        if y_lagged is not None:
+            return y_lagged
+
+        # Try to find lag feature in X
+        if hasattr(X, 'columns'):
+            lag_col = f'demand_lag_{self.lag}h'
+            if lag_col in X.columns:
+                return X[lag_col].values
+
+        # If X is array, assume first column is lag
+        if hasattr(X, 'values'):
+            return X.values[:, 0]
+        return X[:, 0]
+
+    def save(self, path):
+        joblib.dump(self, path)
+
+    @staticmethod
+    def load(path):
+        return joblib.load(path)
+
+
+class SARIMAModel:
+    """
+    SARIMA model for statistical baseline comparison.
+    Optimized for hourly electricity demand with daily seasonality.
+    """
+
+    def __init__(self, order=(2, 1, 2), seasonal_order=(1, 0, 1, 24)):
         self.order = order
         self.seasonal_order = seasonal_order
         self.model = None
         self.fitted_model = None
+        self.train_data = None
 
-    def fit(self, train_data):
+    def fit(self, train_data, maxiter=100):
         """Fit SARIMA model."""
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
         print("Fitting SARIMA model...")
         print(f"Order: {self.order}, Seasonal Order: {self.seasonal_order}")
+        print("This may take a few minutes...")
+
+        # Store training data for forecasting
+        self.train_data = train_data.copy() if hasattr(train_data, 'copy') else train_data
+
+        # Use subset for faster fitting if data is large
+        if len(train_data) > 5000:
+            print(f"Using last 5000 samples for SARIMA fitting (full data: {len(train_data)})")
+            fit_data = train_data[-5000:]
+        else:
+            fit_data = train_data
 
         self.model = SARIMAX(
-            train_data,
+            fit_data,
             order=self.order,
             seasonal_order=self.seasonal_order,
             enforce_stationarity=False,
             enforce_invertibility=False
         )
-        self.fitted_model = self.model.fit(disp=False, maxiter=200)
-        print("SARIMA model fitted successfully")
+
+        try:
+            self.fitted_model = self.model.fit(disp=False, maxiter=maxiter)
+            print("SARIMA model fitted successfully")
+            print(f"AIC: {self.fitted_model.aic:.2f}")
+        except Exception as e:
+            print(f"SARIMA fitting failed: {e}")
+            print("Using simplified ARIMA(1,1,1) instead...")
+            self.order = (1, 1, 1)
+            self.seasonal_order = (0, 0, 0, 0)
+            self.model = SARIMAX(
+                fit_data,
+                order=self.order,
+                enforce_stationarity=False,
+                enforce_invertibility=False
+            )
+            self.fitted_model = self.model.fit(disp=False, maxiter=maxiter)
 
         return self
 
     def predict(self, steps):
-        """Generate forecasts."""
+        """Generate out-of-sample forecasts."""
         if self.fitted_model is None:
             raise ValueError("Model not fitted. Call fit() first.")
 
         forecast = self.fitted_model.forecast(steps=steps)
-        return forecast
+        return forecast.values if hasattr(forecast, 'values') else forecast
+
+    def get_forecast_with_intervals(self, steps, alpha=0.05):
+        """Get forecasts with prediction intervals."""
+        if self.fitted_model is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        forecast = self.fitted_model.get_forecast(steps=steps)
+        mean = forecast.predicted_mean
+        conf_int = forecast.conf_int(alpha=alpha)
+
+        return {
+            'mean': mean.values if hasattr(mean, 'values') else mean,
+            'lower': conf_int.iloc[:, 0].values if hasattr(conf_int, 'iloc') else conf_int[:, 0],
+            'upper': conf_int.iloc[:, 1].values if hasattr(conf_int, 'iloc') else conf_int[:, 1]
+        }
 
     def save(self, path):
         """Save model."""
@@ -160,6 +248,127 @@ class XGBoostModel:
     @staticmethod
     def load(path):
         """Load model."""
+        return joblib.load(path)
+
+
+# =============================================================================
+# LIGHTGBM MODEL
+# =============================================================================
+
+class LightGBMModel:
+    """LightGBM model for demand forecasting."""
+
+    def __init__(self, **params):
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError:
+            raise ImportError("LightGBM required. Install with: pip install lightgbm")
+
+        default_params = {
+            'n_estimators': 500,
+            'max_depth': 10,
+            'learning_rate': 0.05,
+            'num_leaves': 31,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'random_state': RANDOM_STATE,
+            'n_jobs': -1,
+            'verbose': -1
+        }
+        self.params = {**default_params, **params}
+        self.model = LGBMRegressor(**self.params)
+        self.feature_importance = None
+
+    def fit(self, X_train, y_train, X_val=None, y_val=None):
+        """Fit LightGBM model."""
+        print("Fitting LightGBM model...")
+
+        self.model.fit(X_train, y_train)
+
+        self.feature_importance = pd.DataFrame({
+            'feature': X_train.columns if hasattr(X_train, 'columns') else range(X_train.shape[1]),
+            'importance': self.model.feature_importances_
+        }).sort_values('importance', ascending=False)
+
+        print("LightGBM model fitted successfully")
+        return self
+
+    def predict(self, X):
+        """Generate predictions."""
+        return self.model.predict(X)
+
+    def get_feature_importance(self, top_n=20):
+        """Get top N important features."""
+        return self.feature_importance.head(top_n)
+
+    def save(self, path):
+        joblib.dump(self, path)
+
+    @staticmethod
+    def load(path):
+        return joblib.load(path)
+
+
+# =============================================================================
+# QUANTILE REGRESSION FOR PREDICTION INTERVALS
+# =============================================================================
+
+class QuantileRegressionModel:
+    """
+    Gradient Boosting Quantile Regression for prediction intervals.
+    Trains models for lower (5%), median (50%), and upper (95%) quantiles.
+    """
+
+    def __init__(self, quantiles=[0.05, 0.50, 0.95]):
+        from sklearn.ensemble import GradientBoostingRegressor
+
+        self.quantiles = quantiles
+        self.models = {}
+
+        for q in quantiles:
+            self.models[q] = GradientBoostingRegressor(
+                loss='quantile',
+                alpha=q,
+                n_estimators=200,
+                max_depth=6,
+                learning_rate=0.05,
+                random_state=RANDOM_STATE
+            )
+
+    def fit(self, X_train, y_train):
+        """Fit quantile regression models."""
+        print("Fitting Quantile Regression models...")
+
+        for q in self.quantiles:
+            print(f"  Training quantile {q}...")
+            self.models[q].fit(X_train, y_train)
+
+        print("Quantile Regression models fitted successfully")
+        return self
+
+    def predict(self, X):
+        """Predict median (point forecast)."""
+        return self.models[0.50].predict(X)
+
+    def predict_intervals(self, X):
+        """
+        Predict with confidence intervals.
+
+        Returns:
+        --------
+        dict with 'lower', 'median', 'upper' predictions
+        """
+        return {
+            'lower': self.models[self.quantiles[0]].predict(X),
+            'median': self.models[0.50].predict(X),
+            'upper': self.models[self.quantiles[-1]].predict(X)
+        }
+
+    def save(self, path):
+        joblib.dump(self, path)
+
+    @staticmethod
+    def load(path):
         return joblib.load(path)
 
 
